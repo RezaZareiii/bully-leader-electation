@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -40,131 +42,124 @@ var peers = map[string]Peer{
 		Addr: "http://localhost:6004",
 		Port: "6004",
 	},
-	// "node-05": {
-	// 	ID:   "node-05",
-	// 	Addr: "http://localhost:6005",
-	// 	Port: "6005",
-	// }, "node-06": {
-	// 	ID:   "node-06",
-	// 	Addr: "http://localhost:6006",
-	// 	Port: "6006",
-	// },
-}
-
-func getNodeID() string {
-	if len(os.Args) < 2 {
-		panic(errors.New("missing node-id"))
-	}
-	id := os.Args[1]
-
-	if _, ok := peers[id]; !ok {
-		panic(errors.New("invalid node-id"))
-	}
-
-	return id
 }
 
 var nodeID string
+var leaderID string
+
+func getNodeID() string {
+
+	if len(os.Args) < 2 {
+		panic(errors.New("not enough arguments"))
+	}
+
+	nodeID := os.Args[1]
+
+	if _, ok := peers[nodeID]; !ok {
+		panic(errors.New("invalid node-id"))
+	}
+
+	return nodeID
+
+}
 
 func main() {
 
 	nodeID = getNodeID()
 
-	fmt.Println("Node ID: ", nodeID)
+	gin.SetMode(gin.ReleaseMode)
 
-	و
 	r := gin.New()
 
-	r.POST("/ping", func(c *gin.Context) {
-		c.JSON(200, gin.H{})
+	/*
+			    1. ping
+		    2. electation
+		    3. leader-elected
+
+	*/
+
+	r.POST("/ping", func(ctx *gin.Context) {
+		ctx.JSONP(http.StatusOK, gin.H{})
 	})
 
-	r.POST("/electation", func(c *gin.Context) {
-		c.JSON(200, gin.H{})
+	r.POST("/electation", func(ctx *gin.Context) {
 
-		go elect("electation-request")
+		ctx.JSONP(http.StatusOK, gin.H{})
+
+		go elect()
+
 	})
 
-	r.POST("/leader-elected", func(c *gin.Context) {
+	r.POST("/leader-elected", func(ctx *gin.Context) {
 
 		var data map[string]string
-		if err := c.ShouldBindJSON(&data); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+
+		if err := ctx.ShouldBindJSON(&data); err != nil {
 			return
 		}
 
-		leaderID, ok := data["leader"]
+		li, ok := data["leaderID"]
 		if !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Leader ID not provided"})
-			return
+			fmt.Println("expected leader in request body")
+			ctx.JSON(http.StatusBadRequest, gin.H{
+				"error": "expected leader in request body",
+			})
 		}
 
-		fmt.Printf("Leader elected: %s\n", leaderID)
-		c.JSON(200, gin.H{})
+		leaderID = li
 
-		go pingContinuslyLeader(leaderID)
+		fmt.Println("leader elected ", leaderID)
+
+		ctx.JSONP(http.StatusOK, gin.H{})
+
+		go pingContinuslyLeader()
 
 	})
 
 	go r.Run(fmt.Sprintf(":%s", peers[nodeID].Port))
 
-	waitAllPeersBeUp()
+	waitAllPeersToBeUp()
 
-	elect("startup")
+	elect()
 
-	c := make(chan bool)
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGINT)
 	<-c
-}
-
-func waitAllPeersBeUp() {
-
-	for peerID, peer := range peers {
-
-		if peerID == nodeID {
-			continue
-		}
-
-		err := compunicateWithPeer(fmt.Sprintf("%s/ping", peer.Addr), map[string]string{})
-
-		for err != nil {
-			time.Sleep(1 * time.Second)
-			err = compunicateWithPeer(fmt.Sprintf("%s/ping", peer.Addr), map[string]string{})
-		}
-
-		fmt.Println("ping received from peer: ", peer.ID)
-
-	}
 
 }
 
-func compunicateWithPeer(url string, data map[string]string) error {
+func compunicateWithPeer(url string, payload map[string]string) error {
 
-	payload, err := json.Marshal(data)
+	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal data: %w", err)
+		return err
 	}
 
-	// Create an HTTP client with a timeout
 	client := &http.Client{
-		Timeout: 5 * time.Second, // Set timeout to 5 seconds
+		Timeout: 5 * time.Second,
 	}
 
-	resp, err := client.Post(url, "application/json", bytes.NewBuffer(payload))
+	resp, err := client.Post(url, "application/json", bytes.NewBuffer(payloadBytes))
 	if err != nil {
-		return fmt.Errorf("failed to send POST request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("received non-OK response: %d", resp.StatusCode)
+		return errors.New("revived non-ok status code")
 	}
 
 	return nil
 }
 
-func elect(from string) {
-	fmt.Sprintln("start electation")
-	isHighestRankedNodeAvailable := false
+func isRankHigher(ourId string, nodeID string) bool {
+	return strings.Compare(nodeID, ourId) == 1
+}
+
+func elect() {
+
+	isHigherRankNodeAvailable := false
+
 	for _, peer := range peers {
 
 		if !isRankHigher(nodeID, peer.ID) {
@@ -172,14 +167,18 @@ func elect(from string) {
 		}
 
 		err := compunicateWithPeer(fmt.Sprintf("%s/electation", peer.Addr), map[string]string{})
-		if err == nil {
-			isHighestRankedNodeAvailable = true
+		if err != nil {
+			continue
 		}
+
+		isHigherRankNodeAvailable = true
+
 	}
 
-	if !isHighestRankedNodeAvailable {
+	if !isHigherRankNodeAvailable {
 
-		fmt.Printf("I am the leader: %s %s\n", nodeID, from)
+		fmt.Println("I'm the leader: ", nodeID)
+
 		for _, peer := range peers {
 
 			if peer.ID == nodeID {
@@ -187,7 +186,7 @@ func elect(from string) {
 			}
 
 			_ = compunicateWithPeer(fmt.Sprintf("%s/leader-elected", peer.Addr), map[string]string{
-				"leader": nodeID,
+				"leaderID": nodeID,
 			})
 
 		}
@@ -195,19 +194,30 @@ func elect(from string) {
 
 }
 
-func isRankHigher(myNodeID, id string) bool {
-	return strings.Compare(id, myNodeID) == 1
-}
-
-func pingContinuslyLeader(leaderID string) {
+func pingContinuslyLeader() {
 
 	for {
+
 		err := compunicateWithPeer(fmt.Sprintf("%s/ping", peers[leaderID].Addr), map[string]string{})
 		if err != nil {
+			// leader is down
+			elect()
 			break
 		}
-		time.Sleep(5 * time.Second)
+
+		time.Sleep(10 * time.Second)
 	}
-	fmt.Printf("Leader %s is down\n", leaderID)
-	elect("leader-down")
+}
+
+func waitAllPeersToBeUp() {
+
+	for _, peer := range peers {
+
+		for {
+			err := compunicateWithPeer(fmt.Sprintf("%s/ping", peer.Addr), map[string]string{})
+			if err == nil {
+				break
+			}
+		}
+	}
 }

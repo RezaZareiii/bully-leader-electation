@@ -8,13 +8,13 @@ go get -u github.com/gin-gonic/gin
 
 
 
-endpoints: 
-    1. ping
-    2. electation
-    3. leader-elected
+**Endpoints:**
+-  ping
+-  electation
+-  leader-elected
 
 
-main functions:
-    1. comunicateWithPeer
-    2. elect
-    3. pingContinuslyLeader
+**main functions**
+-  comunicateWithPeer
+-  elect
+-  pingContinuslyLeader
